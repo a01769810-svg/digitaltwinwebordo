@@ -175,132 +175,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-// ── Mesa rotatoria (turntable) ───────────────────────────────────────────────
-// Se muestra junto al cobot, en el mismo offset relativo que en la celda real
-// (coords de CellViewer3D: cobot [1.152,1.049,1.0], mesa [0.992,1.259,1.0]).
-// Un botón activa/desactiva su movimiento; mientras está activa sigue el gateway
-// de la Raspberry por ws/turntable, o cae a una simulación local 0°↔180° que
-// imita el ciclo del NEMA (Prueba_con_motor.py: +180°, espera, -180°, repite).
-const TURNTABLE_OFFSET: [number, number, number] = [-0.16, 0.21, 0];
-const TT_DEFAULT_WS = 'wss://unmoral-shrink-cavalry.ngrok-free.dev/ws/turntable';
-const TT_STEPS_180 = 185;               // coincide con el .env de la RPi
-const TT_SPEED_RAD_S = Math.PI / 1.85;  // ≈1.70 rad/s, imita el stepper real
-const TT_DWELL_S = 1.0;                  // pausa en cada extremo (script sleep(1))
-const TT_ANGLE_A = 0;
-const TT_ANGLE_B = Math.PI;              // 180°, límite superior de table_rotation_joint
-const TT_LIVE_STALE_MS = 2500;           // sin frame WS este tiempo → modo sim
-
-interface TurntableState {
-  angle_deg: number;
-  position: 'A' | 'B' | 'MOVING';
-  moving: boolean;
-  last_direction: 'CW' | 'CCW';
-  steps_180: number;
-}
-const TT_REST: TurntableState = {
-  angle_deg: 0, position: 'A', moving: false, last_direction: 'CW', steps_180: TT_STEPS_180,
-};
-
-// Tolerante: acepta {turntable:{…}} o el objeto plano en la raíz.
-function parseTurntableFrame(raw: any): (Partial<TurntableState> & { _demo?: boolean }) | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const t = raw.turntable ?? raw;
-  if (typeof t.angle_deg !== 'number') return null;
-  return { ...t, _demo: raw._demo };
-}
-
-function useTurntableUrdf(): URDFRobot | null {
-  const [robot, setRobot] = useState<URDFRobot | null>(null);
-  useEffect(() => {
-    const loader = new URDFLoader();
-    loader.workingPath = '';
-    loader.parseCollision = false;
-    fetch('/urdf/turntable_rivet_cell.urdf')
-      .then((res) => { if (!res.ok) throw new Error(`URDF ${res.status}`); return res.text(); })
-      .then((text) => {
-        const r = loader.parse(text);
-        r.traverse((c) => { c.castShadow = true; c.receiveShadow = true; });
-        setRobot(r);
-      })
-      .catch((e) => { console.error('Turntable URDF load failed:', e); });
-  }, []);
-  return robot;
-}
-
-// Renderiza la mesa en el offset de planta y mueve table_rotation_joint.  Lleva
-// la lógica de slew + simulación local para que angleRef avance suave cada frame.
-function LiveTurntable({
-  angleRef, activeRef, liveTargetRef, liveAtRef, stepsRef, onState,
-}: {
-  angleRef: React.MutableRefObject<number>;
-  activeRef: React.MutableRefObject<boolean>;
-  liveTargetRef: React.MutableRefObject<number | null>;
-  liveAtRef: React.MutableRefObject<number>;
-  stepsRef: React.MutableRefObject<number>;
-  onState: (s: TurntableState) => void;
-}) {
-  const robot = useTurntableUrdf();
-  const groupRef = useRef<THREE.Group>(null);
-  const simDirRef = useRef<1 | -1>(1);   // +1 → hacia B, -1 → hacia A
-  const dwellRef = useRef(0);
-  const lastReportRef = useRef(0);
-  const lastDirRef = useRef<'CW' | 'CCW'>('CW');
-
-  useFrame((_, dt) => {
-    const now = performance.now();
-    const liveFresh = liveTargetRef.current !== null && (now - liveAtRef.current) < TT_LIVE_STALE_MS;
-    const active = activeRef.current;
-
-    let target = angleRef.current; // por defecto: mantener
-    if (liveFresh) {
-      target = liveTargetRef.current as number;
-    } else if (active) {
-      target = simDirRef.current === 1 ? TT_ANGLE_B : TT_ANGLE_A;
-      if (dwellRef.current > 0) {
-        dwellRef.current = Math.max(0, dwellRef.current - dt);
-      } else if (Math.abs(angleRef.current - target) < 0.001) {
-        dwellRef.current = TT_DWELL_S;
-        simDirRef.current = simDirRef.current === 1 ? -1 : 1;
-      }
-    }
-
-    const prev = angleRef.current;
-    const maxStep = TT_SPEED_RAD_S * dt;
-    const delta = target - prev;
-    const next = Math.abs(delta) <= maxStep ? target : prev + Math.sign(delta) * maxStep;
-    angleRef.current = next;
-
-    if (robot) {
-      robot.setJointValue('table_rotation_joint', next);
-      if (groupRef.current) groupRef.current.updateMatrixWorld(true);
-    }
-
-    const movingNow = Math.abs(next - prev) > 1e-5;
-    if (movingNow) lastDirRef.current = next > prev ? 'CW' : 'CCW';
-
-    if (now - lastReportRef.current > 100) {
-      lastReportRef.current = now;
-      const deg = next * 180 / Math.PI;
-      let position: TurntableState['position'];
-      if (movingNow) position = 'MOVING';
-      else if (Math.abs(deg) < 5) position = 'A';
-      else if (Math.abs(deg - 180) < 5) position = 'B';
-      else position = 'MOVING';
-      onState({
-        angle_deg: Math.round(deg * 10) / 10, position, moving: movingNow,
-        last_direction: lastDirRef.current, steps_180: stepsRef.current,
-      });
-    }
-  });
-
-  if (!robot) return null;
-  return (
-    <group ref={groupRef} position={TURNTABLE_OFFSET}>
-      <primitive object={robot} />
-    </group>
-  );
-}
-
 export default function CobotLiveView() {
   const [mode, setMode] = useState<ConnMode>('demo');
   // Permanent ngrok static domain fronting the RPi gateway (https/wss so it
@@ -318,73 +192,6 @@ export default function CobotLiveView() {
   // 3D cobot reads these; default HOME, driven by telemetry only when applyToModel.
   const targetJointsRef = useRef<[number, number, number, number, number, number]>([...HOME_JOINTS]);
   const tcpWorldRef = useRef<[number, number, number]>([0, 0, 0]);
-
-  // ── Mesa rotatoria: estado, refs y control (botón activar/desactivar) ───────
-  const [ttActive, setTtActive] = useState(false);
-  const [ttState, setTtState] = useState<TurntableState>(TT_REST);
-  const [ttLive, setTtLive] = useState(false);            // ha llegado un frame WS
-  const ttAngleRef = useRef(0);                            // ángulo mostrado (rad)
-  const ttActiveRef = useRef(false);
-  const ttLiveTargetRef = useRef<number | null>(null);     // último ángulo en vivo (rad)
-  const ttLiveAtRef = useRef(0);
-  const ttStepsRef = useRef(TT_STEPS_180);
-  const ttWsRef = useRef<WebSocket | null>(null);
-  const ttReconnectRef = useRef<number | null>(null);
-
-  const ttSendCmd = (command: 'start' | 'stop') => {
-    const ws = ttWsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ command })); } catch { /* ignore */ }
-    }
-  };
-  const ttOpenSocket = () => {
-    try {
-      const ws = new WebSocket(TT_DEFAULT_WS);
-      ttWsRef.current = ws;
-      ws.onopen = () => ttSendCmd('start');
-      ws.onmessage = (e) => {
-        let raw: any; try { raw = JSON.parse(e.data); } catch { return; }
-        const t = parseTurntableFrame(raw);
-        if (!t || typeof t.angle_deg !== 'number') return;
-        ttLiveTargetRef.current = t.angle_deg * Math.PI / 180;
-        ttLiveAtRef.current = performance.now();
-        if (typeof t.steps_180 === 'number') ttStepsRef.current = t.steps_180;
-        setTtLive(true);
-      };
-      ws.onclose = () => {
-        ttWsRef.current = null;
-        setTtLive(false);
-        // Mientras siga activa, reintenta en silencio para que un gateway que
-        // arranque después tome el control sin que el usuario haga nada.
-        if (ttActiveRef.current && ttReconnectRef.current === null) {
-          ttReconnectRef.current = window.setTimeout(() => {
-            ttReconnectRef.current = null;
-            if (ttActiveRef.current) ttOpenSocket();
-          }, 4000);
-        }
-      };
-      ws.onerror = () => { /* onclose maneja el fallback a simulación */ };
-    } catch { /* cae a la simulación local */ }
-  };
-  const ttCloseSocket = () => {
-    if (ttReconnectRef.current) { window.clearTimeout(ttReconnectRef.current); ttReconnectRef.current = null; }
-    const ws = ttWsRef.current;
-    if (ws) {
-      ws.onclose = null;
-      try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ command: 'stop' })); } catch { /* ignore */ }
-      ws.close();
-      ttWsRef.current = null;
-    }
-    setTtLive(false);
-    ttLiveTargetRef.current = null;
-  };
-  const ttActivate = () => { setTtActive(true); ttActiveRef.current = true; ttOpenSocket(); };
-  const ttDeactivate = () => {
-    setTtActive(false); ttActiveRef.current = false; ttCloseSocket();
-    setTtState((s) => ({ ...s, moving: false }));
-  };
-  const onTurntableState = React.useCallback((s: TurntableState) => { setTtState(s); }, []);
-  useEffect(() => () => { ttCloseSocket(); }, []); // cierra el socket de la mesa al desmontar
 
   // Drive the model from telemetry (deg → rad direct map).  Joint zero-offsets
   // between the LXM controller and our URDF may differ; refine per-joint here
@@ -559,14 +366,6 @@ export default function CobotLiveView() {
               fadeDistance={6} infiniteGrid={false} />
             <Suspense fallback={null}>
               <LiveCobot targetRef={targetJointsRef} tcpWorldRef={tcpWorldRef} />
-              <LiveTurntable
-                angleRef={ttAngleRef}
-                activeRef={ttActiveRef}
-                liveTargetRef={ttLiveTargetRef}
-                liveAtRef={ttLiveAtRef}
-                stepsRef={ttStepsRef}
-                onState={onTurntableState}
-              />
             </Suspense>
             <Html position={[0, 0, 1.15]} center>
               <div style={{
@@ -586,23 +385,6 @@ export default function CobotLiveView() {
           }}>
             {applyToModel ? '◉ 3D sigue joints en vivo' : '◯ 3D fijo en HOME'}
           </button>
-
-          {/* === BOTÓN ACTIVAR / DESACTIVAR EL MOVIMIENTO DE LA MESA === */}
-          {ttActive ? (
-            <button onClick={ttDeactivate} style={{
-              position: 'absolute', right: 12, bottom: 12, fontFamily: SANS_FONT,
-              fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer',
-              border: 'none', borderRadius: 6, padding: '9px 16px', letterSpacing: 0.4,
-              background: 'linear-gradient(180deg,#f47835 0%,#d96416 100%)',
-            }}>■ DESACTIVAR MESA</button>
-          ) : (
-            <button onClick={ttActivate} style={{
-              position: 'absolute', right: 12, bottom: 12, fontFamily: SANS_FONT,
-              fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer',
-              border: 'none', borderRadius: 6, padding: '9px 16px', letterSpacing: 0.4,
-              background: 'linear-gradient(180deg,#22cc55 0%,#15803d 100%)',
-            }}>▶ ACTIVAR MESA</button>
-          )}
         </div>
 
         {/* Telemetry side panel */}
@@ -612,29 +394,6 @@ export default function CobotLiveView() {
           borderLeft: '1px solid #1d2c44',
           background: 'linear-gradient(180deg,#0c1828 0%,#0a1422 100%)',
         }}>
-          <Section title="Mesa rotatoria">
-            <div style={statRow}>
-              <span>Movimiento</span>
-              <span style={{ color: ttActive ? '#22dd55' : '#5a6c84', fontWeight: 700 }}>
-                {ttActive ? 'ACTIVA' : 'INACTIVA'}
-              </span>
-            </div>
-            <div style={statRow}>
-              <span>Posición</span>
-              <span style={{ color: ttState.position === 'A' ? '#22dd55' : ttState.position === 'B' ? '#38bdf8' : '#fbbf24', fontWeight: 700 }}>
-                {ttState.position}
-              </span>
-            </div>
-            <div style={statRow}><span>Ángulo</span><span style={{ color: '#dde4f0' }}>{ttState.angle_deg.toFixed(1)}°</span></div>
-            <div style={statRow}><span>Dirección</span><span style={{ color: '#9bf' }}>{ttState.last_direction}</span></div>
-            <div style={statRow}>
-              <span>Origen</span>
-              <span style={{ color: !ttActive ? '#5a6c84' : ttLive ? '#22dd55' : '#38bdf8' }}>
-                {!ttActive ? '—' : ttLive ? 'Raspberry Pi' : 'Simulación'}
-              </span>
-            </div>
-          </Section>
-
           <Section title="Estado del robot">
             <Flag label="Power ON" on={s.power_on} />
             <Flag label="Robot enabled" on={s.robot_enabled} />

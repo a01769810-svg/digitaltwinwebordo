@@ -1,8 +1,0 @@
-fastapi
-uvicorn[standard]
-websockets
-python-dotenv
-
-# Solo en la Raspberry Pi (control físico del NEMA).  En una laptop estas
-# librerías no se instalan/importan y el backend entra en modo MOCK solo.
-rpi-lgpio   # provee la API RPi.GPIO en Raspberry Pi 4/5
