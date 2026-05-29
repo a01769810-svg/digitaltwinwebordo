@@ -1,94 +1,138 @@
-# README — Raspberry Turntable Gateway
+# Raspberry Turntable Gateway
 
-Gateway de la **mesa rotatoria (turntable)** de la celda Schneider para la
-**Raspberry Pi 4**. Controla el disco con un **NEMA 17 + A4988** y dos **limit
-switches**, simula el **remachado**, y publica el estado por **WebSocket/REST**
-para que la web lo mueva en tiempo real en la pestaña **"Cobot en Vivo"**.
+Gateway de la mesa rotatoria de la celda Schneider para Raspberry Pi 4. Controla
+un NEMA 17 con driver A4988, lee dos limit switches, simula el tiempo de
+remachado y publica el estado por REST/WebSocket para la web.
 
-El contrato JSON es **idéntico** al de la simulación web (`turntableSim.ts`), así
-que la web no distingue mock de hardware: solo cambia la fuente de datos.
+El contrato JSON debe mantenerse alineado con `components/turntableSim.ts`. La
+web no deberia distinguir entre mock y hardware real: solo cambia la fuente de
+datos.
 
----
+## Archivos
 
-## Archivos (nombres autoexplicativos)
-
-| Archivo | Para qué sirve |
+| Archivo | Funcion |
 |---|---|
-| `raspberry_turntable_gpio_controller.py` | **Controlador seguro** de la mesa. Clase `TurntableController`: STEP/DIR, limits, `move_to_work()`, `move_to_home()`, `run_riveting_cycle()`, `read_limits()`, `get_turntable_state()`, `stop()`, `cleanup()`. Modo MOCK automático. **No mueve el motor al importar.** |
-| `raspberry_turntable_fastapi_gateway.py` | **Servidor FastAPI + WebSocket.** Expone `/health`, `/api/turntable/state`, `/api/turntable/start-cycle`, `/api/turntable/stop`, `/ws/turntable`. El ciclo corre en hilo worker (no bloquea el WS). |
-| `raspberry_turntable_mock_test.py` | Corre un **ciclo completo en MOCK** (sin hardware) e imprime el contrato en cada transición. Valida la lógica en laptop. |
-| `raspberry_turntable_limit_switch_test.py` | Prueba **aislada de los limit switches** (no mueve el motor). |
-| `raspberry_turntable_stepper_test.py` | Prueba **aislada del motor** (gira N pasos ida y vuelta). Para calibrar `STEPS_180`. ⚠ Sí mueve el motor. |
-| `raspberry_turntable_env_example.env` | **Plantilla de configuración** (pines, pasos, tiempos). Copiar a `.env`. |
+| `raspberry_turntable_fastapi_gateway.py` | Corre el gateway FastAPI + WebSocket. Expone `/health`, `/api/turntable/state`, `/api/turntable/start-cycle`, `/api/turntable/stop` y `/ws/turntable`. |
+| `raspberry_turntable_gpio_controller.py` | Controlador GPIO seguro. Maneja STEP/DIR, limits, movimiento HOME/WORK, ciclo de remachado, `stop()` y `cleanup()`. No debe mover motor al importar. |
+| `raspberry_turntable_limit_switch_test.py` | Prueba limits sin mover el motor. Usar primero para validar cableado. |
+| `raspberry_turntable_stepper_test.py` | Prueba el stepper. Mueve el motor; usar solo con hardware libre y supervisado. |
+| `raspberry_turntable_mock_test.py` | Corre ciclo completo en mock sin GPIO. Sirve para laptop o debug sin hardware. |
+| `raspberry_turntable_env_example.env` | Plantilla de `.env` con pines, pasos y tiempos. |
 | `requirements.txt` | Dependencias Python. |
 
----
+## Pines GPIO esperados
 
-## Pinout (BCM)
+Numeracion BCM:
 
-| Señal | GPIO | Notas |
+| Senal | GPIO | Notas |
 |---|---|---|
-| STEP (A4988) | **GPIO17** | configurable `STEP_PIN` |
-| DIR (A4988) | **GPIO27** | configurable `DIR_PIN` |
-| LIMIT_HOME | **GPIO22** | pull-up interno; presionado = LOW |
-| LIMIT_WORK | **GPIO23** | pull-up interno; presionado = LOW |
+| STEP | GPIO17 | Pulso STEP al A4988. |
+| DIR | GPIO27 | Direccion del A4988. |
+| LIMIT_HOME | GPIO22 | Pull-up interno. |
+| LIMIT_WORK | GPIO23 | Pull-up interno. |
 
-> `STEPS_180` (pasos para 180°) **debe calibrarse en hardware** con el
-> `stepper_test`. El valor de referencia es 185, pero depende del microstepping
-> del A4988 y de la reductora/correa.
+Limits con pull-up interno:
 
----
+- Sin presionar: HIGH.
+- Presionado: LOW.
 
-## Cómo correr
+No cambies estos pines sin confirmar el cableado fisico.
 
-### 1. Mock en laptop (sin Raspberry, sin hardware)
+## Instalacion
+
 ```bash
 cd raspberry_turntable_gateway
-pip install -r requirements.txt          # o solo: pip install fastapi uvicorn[standard] python-dotenv
-
-# Test de lógica (imprime el contrato en cada transición):
-TURNTABLE_MOCK=1 python raspberry_turntable_mock_test.py
-# Windows PowerShell:  $env:TURNTABLE_MOCK=1; python raspberry_turntable_mock_test.py
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp raspberry_turntable_env_example.env .env
 ```
 
-### 2. Gateway en mock (la web ya se conecta)
+En Windows PowerShell para pruebas mock:
+
+```powershell
+cd raspberry_turntable_gateway
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item raspberry_turntable_env_example.env .env
+```
+
+## Correr gateway
+
+Mock sin hardware:
+
 ```bash
 TURNTABLE_MOCK=1 uvicorn raspberry_turntable_fastapi_gateway:app --host 0.0.0.0 --port 8000
-# Pruebas:
-#   curl http://localhost:8000/health
-#   curl http://localhost:8000/api/turntable/state
-#   curl -X POST http://localhost:8000/api/turntable/start-cycle
 ```
 
-### 3. En la Raspberry Pi (hardware real)
-```bash
-cp raspberry_turntable_env_example.env .env   # ajusta pines/STEPS_180
-# Primero valida cableado SIN ciclo:
-python raspberry_turntable_limit_switch_test.py
-python raspberry_turntable_stepper_test.py     # ⚠ mueve el motor (pocos pasos)
-# Luego el gateway real:
+PowerShell:
+
+```powershell
+$env:TURNTABLE_MOCK=1
 uvicorn raspberry_turntable_fastapi_gateway:app --host 0.0.0.0 --port 8000
 ```
 
----
+Hardware real:
+
+```bash
+uvicorn raspberry_turntable_fastapi_gateway:app --host 0.0.0.0 --port 8000
+```
+
+Endpoints:
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/api/turntable/state
+curl -X POST http://localhost:8000/api/turntable/start-cycle
+```
+
+WebSocket:
+
+```text
+ws://<IP-de-la-RPi>:8000/ws/turntable
+```
+
+## Pruebas recomendadas
+
+Primero mock:
+
+```bash
+TURNTABLE_MOCK=1 python raspberry_turntable_mock_test.py
+```
+
+Luego limits, sin mover motor:
+
+```bash
+python raspberry_turntable_limit_switch_test.py
+```
+
+Despues stepper, solo con hardware seguro:
+
+```bash
+python raspberry_turntable_stepper_test.py
+```
+
+Finalmente gateway real:
+
+```bash
+uvicorn raspberry_turntable_fastapi_gateway:app --host 0.0.0.0 --port 8000
+```
 
 ## Conectar con la web
 
-En la pestaña **"Cobot en Vivo"**, el panel **"Mesa Rotatoria · Raspberry"**:
+En la tab `Cobot en Vivo`, panel de mesa rotatoria:
 
-1. Pega la URL del gateway:
-   - LAN: `ws://<IP-de-la-RPi>:8000/ws/turntable`
-   - HTTPS (Railway): publica el puerto 8000 por el **mismo túnel ngrok** del
-     cobot y usa `wss://<tu-dominio>.ngrok-free.dev/ws/turntable`.
-2. **CONECTAR** → la mesa 3D empieza a girar con `angle_deg` real.
-3. **START CYCLE** → `POST /api/turntable/start-cycle` arranca el ciclo en la RPi.
+1. Usa `ws://<IP-de-la-RPi>:8000/ws/turntable` en LAN.
+2. Si usas tunel publico, usa `wss://<dominio>/ws/turntable`.
+3. Presiona conectar.
+4. `START CYCLE` llama `POST /api/turntable/start-cycle`.
 
-> Si no hay gateway, la vista cae a **DEMO** silenciosamente (mesa en HOME).
-> La **simulación completa** (sin hardware) vive en la pestaña **"Celda 3D"**.
+Si no hay gateway, la web cae a modo demo.
 
----
+## Contrato JSON
 
-## Contrato JSON (`/ws/turntable` y `/api/turntable/state`)
+Ejemplo:
 
 ```json
 {
@@ -111,19 +155,24 @@ En la pestaña **"Cobot en Vivo"**, el panel **"Mesa Rotatoria · Raspberry"**:
 }
 ```
 
-`position` recorre: `HOME → MOVING_TO_WORK → WORK → RIVETING → RIVETING_DONE →
-MOVING_TO_HOME → CYCLE_DONE → HOME`. `_demo=true` cuando corre sin GPIO (mock).
+Estados esperados:
 
----
+```text
+HOME -> MOVING_TO_WORK -> WORK -> RIVETING -> RIVETING_DONE -> MOVING_TO_HOME -> CYCLE_DONE -> HOME
+```
 
-## Seguridad (qué respeta este código)
+No cambies nombres de campos ni valores sin actualizar tambien la web.
 
-- ✅ No mueve el motor al importar módulos ni al instanciar la clase.
-- ✅ Sin `while True` bloqueante a nivel de módulo.
-- ✅ El giro corre en hilo worker → el WebSocket no se congela.
-- ✅ Rechaza comandos si ya está en movimiento (serialización + HTTP 409).
-- ✅ `stop()` interrumpe; `cleanup()` hace `GPIO.cleanup()` ordenado.
-- ✅ Pines/pasos/tiempos en `.env`, no hardcodeados como verdad única.
-- ✅ La web manda **intención** (`start-cycle`); la RPi valida y ejecuta.
-- ⚠ Open-loop (sin encoder): `angle_deg` es **estimado** por pasos. El límite
-  físico es la verdad de posición (HOME/WORK).
+## Seguridad
+
+- No energices el motor sin revisar driver, fuente, corriente limite y masa
+  comun con Raspberry.
+- Haz primero `raspberry_turntable_limit_switch_test.py`.
+- Usa `raspberry_turntable_stepper_test.py` solo con la mesa libre de manos,
+  herramientas y piezas sueltas.
+- Ten forma fisica de cortar energia al motor.
+- Verifica que `STEPS_180` este calibrado antes de ciclos completos.
+- El sistema es open-loop: `angle_deg` es estimado por pasos. Los limit switches
+  son la referencia fisica.
+- `stop()` y `cleanup()` existen, pero no sustituyen un paro fisico de seguridad.
+- No corras pruebas de motor por SSH sin alguien supervisando el hardware.
