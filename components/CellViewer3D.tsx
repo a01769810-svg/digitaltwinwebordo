@@ -10,6 +10,13 @@ import * as THREE from 'three';
 import { STLLoader } from 'three-stdlib';
 import URDFLoader from 'urdf-loader';
 import type { URDFRobot } from 'urdf-loader';
+import OperatorHMI from './OperatorHMI';
+import { useTurntableSim, type UseTurntableSim } from './useTurntableSim';
+
+// El panel DEBUG (poses, IK, jogging, secuencia) es una herramienta interna de
+// desarrollo. NO se muestra al usuario final: la pestaña "Celda 3D" arranca en
+// la HMI de operador (V62).  Para depurar, pon SHOW_DEBUG = true.
+const SHOW_DEBUG = false;
 
 // ── V60 poses (legacy backup; kept as the TCP source of truth) ──────────────
 // These joint values came from the V60 simulation's resolved_poses.py.  The
@@ -2039,8 +2046,10 @@ function HMIPanel({
   poseRegenStatus,
   poseRegenWarnings,
   regeneratePoseLib,
+  turntableSim,
 }: {
   setPose: (p: PoseName) => void;
+  turntableSim: UseTurntableSim;
   jointsRef: React.MutableRefObject<[number, number, number, number, number, number]>;
   discAngleRef: React.MutableRefObject<number>;
   setDiscAngle: (a: number) => void;
@@ -2111,42 +2120,21 @@ function HMIPanel({
       overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12,
       zIndex: 25,
     }}>
-      {/* Tab bar (panel header is gone — top bar already carries the brand). */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0 }}>
-        <button onClick={() => setTab('hmi')} style={tabBtnStyle(tab === 'hmi')}>
-          HMI
-        </button>
-        <button onClick={() => setTab('debug')} style={tabBtnStyle(tab === 'debug')}>
-          DEBUG
-        </button>
-      </div>
-
-      {tab === 'hmi' && (
-        <div style={{
-          padding: '24px 18px', textAlign: 'left', color: '#9bb0c8',
-          border: '1px solid #1d2c44', background: 'rgba(20,30,48,0.45)',
-          borderRadius: 8,
-        }}>
-          <div style={{
-            fontSize: 9, letterSpacing: 2.5, color: '#22c55e',
-            textTransform: 'uppercase', fontWeight: 600, marginBottom: 6,
-          }}>
-            schneider_hmi · V60
-          </div>
-          <div style={{
-            fontSize: 14, fontWeight: 600, color: '#f1f5f9',
-            marginBottom: 12, letterSpacing: -0.2,
-          }}>
-            Operator HMI
-          </div>
-          <div style={{ fontSize: 11, lineHeight: 1.55, color: '#7a8c9e' }}>
-            Pending: DI/DO lamps, cycle state, verdict, spawn/stop, V60 cell-state machine.
-            Wire the existing refs and we're done.
-          </div>
+      {/* Tab bar.  DEBUG sólo aparece si SHOW_DEBUG (herramienta interna). */}
+      {SHOW_DEBUG && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0 }}>
+          <button onClick={() => setTab('hmi')} style={tabBtnStyle(tab === 'hmi')}>
+            HMI
+          </button>
+          <button onClick={() => setTab('debug')} style={tabBtnStyle(tab === 'debug')}>
+            DEBUG
+          </button>
         </div>
       )}
 
-      {tab === 'debug' && <>
+      {tab === 'hmi' && <OperatorHMI sim={turntableSim} />}
+
+      {SHOW_DEBUG && tab === 'debug' && <>
 
       {/* === Sequence player === */}
       <Section title="Cycle Sequence">
@@ -2725,6 +2713,10 @@ const statRow: React.CSSProperties = {
 export default function CellViewer3D() {
   const jointsRef = useRef<[number, number, number, number, number, number]>([...POSE_LIB.POSE_HOME]);
   const discAngleRef = useRef(0);
+  // Simulación (mock) de la mesa rotatoria: corre la máquina de estados completa
+  // HOME→WORK→RIVETING→HOME y escribe el ángulo del disco en discAngleRef para
+  // que el URDF gire en tiempo real.  Alimenta también la HMI V62.
+  const turntableSim = useTurntableSim(discAngleRef);
   const gripperRef = useRef<number>(GRIPPER_OPEN_M);        // target
   const gripperLiveRef = useRef<number>(GRIPPER_OPEN_M);    // animated
   const gripperWorldRef = useRef<[number, number, number]>([0, 0, 0]);
@@ -3165,6 +3157,7 @@ export default function CellViewer3D() {
           poseRegenStatus={poseRegenStatus}
           poseRegenWarnings={poseRegenWarnings}
           regeneratePoseLib={regeneratePoseLib}
+          turntableSim={turntableSim}
         />
       </div>
     </div>
