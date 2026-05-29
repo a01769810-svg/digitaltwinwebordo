@@ -18,6 +18,8 @@ import { OrbitControls, Grid, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import URDFLoader from 'urdf-loader';
 import type { URDFRobot } from 'urdf-loader';
+import { useLiveTurntable } from './useLiveTurntable';
+import type { TurntableContract } from './turntableSim';
 
 const SANS_FONT =
   '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif';
@@ -133,6 +135,50 @@ function LiveCobot({
   );
 }
 
+// ── Turntable EN VIVO (URDF de la mesa, disco girado por angle_deg real) ─────
+// Offset relativo al cobot (= TURNTABLE_BASE − COBOT_BASE en CellViewer3D), para
+// que en esta escena (cobot en el origen) la mesa quede a su lado.
+const TURNTABLE_OFFSET: [number, number, number] = [-0.160, 0.210, 0.0];
+
+function useTurntableUrdf(): URDFRobot | null {
+  const [robot, setRobot] = useState<URDFRobot | null>(null);
+  useEffect(() => {
+    const loader = new URDFLoader();
+    loader.workingPath = '';
+    loader.parseCollision = false;
+    fetch('/urdf/turntable_rivet_cell.urdf')
+      .then((res) => { if (!res.ok) throw new Error(`URDF ${res.status}`); return res.text(); })
+      .then((text) => {
+        const r = loader.parse(text);
+        r.traverse((c) => { c.castShadow = true; c.receiveShadow = true; });
+        setRobot(r);
+      })
+      .catch((e) => { console.error('Turntable URDF load failed:', e); });
+  }, []);
+  return robot;
+}
+
+// El disco sigue el ángulo en vivo (radianes) con easing, igual que LiveCobot
+// suaviza los joints: la mesa real reporta a saltos y aquí se ve fluido.
+function LiveTurntable({ angleTargetRef }: { angleTargetRef: React.MutableRefObject<number> }) {
+  const robot = useTurntableUrdf();
+  const groupRef = useRef<THREE.Group>(null);
+  const liveRef = useRef(0);
+  useFrame((_, dt) => {
+    if (!robot) return;
+    const k = Math.min(1, dt * 6);
+    liveRef.current += (angleTargetRef.current - liveRef.current) * k;
+    robot.setJointValue('table_rotation_joint', liveRef.current);
+    if (groupRef.current) groupRef.current.updateMatrixWorld(true);
+  });
+  if (!robot) return null;
+  return (
+    <group ref={groupRef} position={TURNTABLE_OFFSET}>
+      <primitive object={robot} />
+    </group>
+  );
+}
+
 function ZUp() {
   const { camera, scene } = useThree();
   useEffect(() => {
@@ -175,6 +221,64 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+// ── Panel de la mesa rotatoria EN VIVO (conexión propia + contrato nuevo) ────
+function TurntableLivePanel({ turntable }: { turntable: ReturnType<typeof useLiveTurntable> }) {
+  const { mode, telemetry, url, setUrl, connect, disconnect, startCycle, connErr } = turntable;
+  const tt: TurntableContract = telemetry.turntable;
+  const backendDemo = mode === 'live' && telemetry._demo === true;
+  const dot = backendDemo ? '#fbbf24'
+    : mode === 'live' ? '#22dd55'
+    : mode === 'connecting' ? '#fbbf24'
+    : mode === 'error' ? '#ff5566' : '#5a6c84';
+  const label = backendDemo ? 'GATEWAY OK · motor en mock'
+    : mode === 'live' ? 'EN VIVO'
+    : mode === 'connecting' ? 'CONECTANDO…'
+    : mode === 'error' ? 'ERROR' : 'DEMO (sin gateway)';
+  const posColor = tt.fault ? '#ff5566'
+    : tt.position === 'RIVETING' ? '#fb923c'
+    : tt.moving ? '#3b8bff' : '#a78bfa';
+  return (
+    <Section title="Mesa Rotatoria · Raspberry">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <span style={{ width: 9, height: 9, borderRadius: '50%', background: dot, boxShadow: `0 0 7px ${dot}` }} />
+        <span style={{ fontSize: 11, fontWeight: 700, color: '#f1f5f9' }}>{label}</span>
+      </div>
+      <input
+        value={url}
+        onChange={(e) => setUrl(e.target.value)}
+        spellCheck={false}
+        placeholder="wss://…/ws/turntable  ó  http://…/api/turntable/state"
+        style={{
+          width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: 10,
+          color: '#dde4f0', background: '#0a1422', border: '1px solid #1d2c44',
+          borderRadius: 6, padding: '6px 8px', outline: 'none', marginBottom: 6,
+        }} />
+      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+        {mode === 'live' || mode === 'connecting' ? (
+          <button onClick={disconnect} style={{ flex: 1, fontFamily: SANS_FONT, fontSize: 10.5, fontWeight: 700, color: '#fff', cursor: 'pointer', border: 'none', borderRadius: 6, padding: '7px 0', background: 'linear-gradient(180deg,#f47835 0%,#d96416 100%)' }}>DESCONECTAR</button>
+        ) : (
+          <button onClick={() => connect(url, false)} style={{ flex: 1, fontFamily: SANS_FONT, fontSize: 10.5, fontWeight: 700, color: '#fff', cursor: 'pointer', border: 'none', borderRadius: 6, padding: '7px 0', background: 'linear-gradient(180deg,#22cc55 0%,#15803d 100%)' }}>CONECTAR</button>
+        )}
+        <button onClick={startCycle} style={{ flex: 1, fontFamily: SANS_FONT, fontSize: 10.5, fontWeight: 700, color: '#fff', cursor: 'pointer', border: 'none', borderRadius: 6, padding: '7px 0', background: 'linear-gradient(180deg,#3b8bff 0%,#2563eb 100%)' }}>START CYCLE</button>
+      </div>
+      {connErr && (
+        <div style={{ fontSize: 9.5, color: '#ff8a98', fontFamily: 'monospace', marginBottom: 8 }}>⚠ {connErr}</div>
+      )}
+      <div style={statRow}><span>Posición</span><span style={{ color: posColor, fontWeight: 700 }}>{tt.position}</span></div>
+      <div style={statRow}><span>Ángulo</span><span style={{ color: '#dde4f0' }}>{tt.angle_deg.toFixed(1)}°</span></div>
+      <div style={statRow}><span>Target</span><span style={{ color: '#9bf' }}>{tt.target}</span></div>
+      <div style={statRow}><span>Dirección</span><span style={{ color: '#9bf' }}>{tt.last_direction}</span></div>
+      <Flag label="Moving" on={tt.moving} />
+      <Flag label="Limit HOME" on={tt.limit_home} />
+      <Flag label="Limit WORK" on={tt.limit_work} />
+      <Flag label="Riveting" on={tt.riveting} />
+      <Flag label="Riveting done" on={tt.riveting_done} />
+      <Flag label="Fault" on={tt.fault} goodWhenOn={false} />
+      <div style={{ fontSize: 10, color: '#9bb0c8', marginTop: 6, fontStyle: 'italic' }}>{tt.message}</div>
+    </Section>
+  );
+}
+
 export default function CobotLiveView() {
   const [mode, setMode] = useState<ConnMode>('demo');
   // Permanent ngrok static domain fronting the RPi gateway (https/wss so it
@@ -192,6 +296,13 @@ export default function CobotLiveView() {
   // 3D cobot reads these; default HOME, driven by telemetry only when applyToModel.
   const targetJointsRef = useRef<[number, number, number, number, number, number]>([...HOME_JOINTS]);
   const tcpWorldRef = useRef<[number, number, number]>([0, 0, 0]);
+
+  // ── Mesa rotatoria EN VIVO (Raspberry · contrato nuevo HOME/WORK/RIVETING) ──
+  const turntable = useLiveTurntable();
+  const ttAngleTargetRef = useRef(0);
+  useEffect(() => {
+    ttAngleTargetRef.current = (turntable.telemetry.turntable.angle_deg * Math.PI) / 180;
+  }, [turntable.telemetry]);
 
   // Drive the model from telemetry (deg → rad direct map).  Joint zero-offsets
   // between the LXM controller and our URDF may differ; refine per-joint here
@@ -366,6 +477,7 @@ export default function CobotLiveView() {
               fadeDistance={6} infiniteGrid={false} />
             <Suspense fallback={null}>
               <LiveCobot targetRef={targetJointsRef} tcpWorldRef={tcpWorldRef} />
+              <LiveTurntable angleTargetRef={ttAngleTargetRef} />
             </Suspense>
             <Html position={[0, 0, 1.15]} center>
               <div style={{
@@ -394,6 +506,8 @@ export default function CobotLiveView() {
           borderLeft: '1px solid #1d2c44',
           background: 'linear-gradient(180deg,#0c1828 0%,#0a1422 100%)',
         }}>
+          <TurntableLivePanel turntable={turntable} />
+
           <Section title="Estado del robot">
             <Flag label="Power ON" on={s.power_on} />
             <Flag label="Robot enabled" on={s.robot_enabled} />

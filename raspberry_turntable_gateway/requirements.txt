@@ -1,0 +1,9 @@
+# Dependencias del gateway de la mesa rotatoria (Raspberry Pi).
+# Según INSTALACION_RASP_DIGITAL_TWIN.md, en la RPi ya están instaladas.
+fastapi
+uvicorn[standard]
+websockets
+python-dotenv
+# GPIO (solo en la Raspberry; en laptop el controlador cae a MOCK):
+# En Pi 4/5 reciente RPi.GPIO se resuelve vía el shim rpi-lgpio.
+rpi-lgpio ; platform_machine == "aarch64" or platform_machine == "armv7l"
