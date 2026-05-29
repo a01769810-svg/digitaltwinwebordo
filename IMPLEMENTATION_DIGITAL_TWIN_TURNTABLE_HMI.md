@@ -74,6 +74,31 @@ HOME → MOVING_TO_WORK → WORK → RIVETING → RIVETING_DONE
   `requestAnimationFrame` y **escribe el ángulo en el `discAngleRef`** de la
   escena, así el disco URDF gira en tiempo real siguiendo la simulación.
 
+### Ciclo COMPLETO de la celda en Celda 3D (tipo ROS)
+
+La pestaña **Celda 3D** ejecuta el ciclo completo de la celda (el mismo
+`SequencePlayer` de la simulación), ahora disparado desde la HMI:
+
+- Botón **START** → corre una **flota de 5 CAFIs** (5 entran, 5 salen). Cada CAFI:
+  1. **entra al conveyor y viaja por la banda** hasta el punto de pick (paso
+     `cafiConveyor`, el CAFI se ve desplazarse),
+  2. el **cobot** lo recoge del conveyor, lo levanta y lo coloca en el fixture,
+  3. el **disco indexa 180°**, **remacha** (30 s, spec real) e indexa de regreso,
+  4. el cobot recoge la pieza remachada y la lleva a **visión**,
+  5. la **cámara** da veredicto **PASS/FAIL**, y el cobot la deja en el bin
+     **aceptado/rechazado** y vuelve a HOME,
+  6. al terminar, arranca el siguiente CAFI hasta completar los 5.
+- Botón **CAFI** → corre 1 CAFI suelto. **STOP** pausa. **RESET** reinicia la flota.
+- La HMI V62 muestra en vivo el contador **CAFI IN: x/5 · CAFI OUT: x/5**, el
+  estado de mesa, limits, remachado, DI/DO y el veredicto — es un **espejo** del
+  ciclo real (igual que la HMI ROS, que solo refleja estado).
+- Velocidad de demo opcional: `window.__CELL_SPEED = 30` acelera el ciclo
+  (default 1 = timing real). Útil para revisar los 5 CAFIs rápido.
+
+**Verificado headless (Chrome):** START → los 5 CAFIs recorren
+`conveyor → in_gripper → on_fixture → at_vision → bin`, el cobot se mueve en
+todas las poses, CAFI IN 5/5 y OUT 5/5, **cero errores de consola**.
+
 ### Reparto Celda 3D vs Cobot en Vivo
 
 - **Celda 3D** = **simulación 100% mock** desde la web (sin hardware): se opera

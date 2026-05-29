@@ -13,13 +13,26 @@
 //   · 8 lámparas Digital Output (Motor · Disco · Remachado · Cámara · Grip x2 ·
 //     Solenoide · Reservado)
 //
-// Aquí se alimenta de la SIMULACIÓN web de la mesa (useTurntableSim), e incluye
-// además la lectura del contrato del turntable (HOME/WORK/RIVETING, limits,
-// remachado). Convive con la escena 3D dentro de la pestaña "Celda 3D".
+// Se alimenta de un snapshot derivado del ciclo REAL de la celda (SequencePlayer
+// en CellViewer3D), e incluye la lectura del contrato del turntable
+// (HOME/WORK/RIVETING, limits, remachado) y el contador de la flota de CAFIs.
+// Convive con la escena 3D dentro de la pestaña "Celda 3D".
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React from 'react';
-import type { UseTurntableSim } from './useTurntableSim';
+import type { SimSnapshot } from './turntableSim';
+
+export interface OperatorHMIProps {
+  snapshot: SimSnapshot;
+  onStart: () => void;
+  onCafi: () => void;
+  onStop: () => void;
+  onReset: () => void;
+  /** Contador de la flota de CAFIs (entran / salen / objetivo). */
+  cafiIn?: number;
+  cafiOut?: number;
+  total?: number;
+}
 
 const COLOR_OFF = '#3a4a5e';
 const COLOR_ON = '#22dd55';
@@ -77,14 +90,16 @@ function statRow(label: string, value: string, color = '#dde4f0') {
   );
 }
 
-export default function OperatorHMI({ sim }: { sim: UseTurntableSim }) {
-  const s = sim.snapshot;
+export default function OperatorHMI({
+  snapshot, onStart, onCafi, onStop, onReset, cafiIn, cafiOut, total,
+}: OperatorHMIProps) {
+  const s = snapshot;
   const tt = s.turntable;
 
   const startEnabled = s.cell === 'IDLE';
   const cafiEnabled = s.spawnAllowed;
   const stopEnabled = s.cell === 'RUNNING';
-  const resetEnabled = s.cell === 'PAUSED' || s.cell === 'FAULT';
+  const resetEnabled = s.cell === 'PAUSED' || s.cell === 'FAULT' || s.cell === 'RUNNING';
 
   const cellColor =
     s.cell === 'FAULT' ? COLOR_WARN : s.cell === 'RUNNING' ? COLOR_ON : s.cell === 'PAUSED' ? '#fbbf24' : '#cbd5e1';
@@ -104,11 +119,23 @@ export default function OperatorHMI({ sim }: { sim: UseTurntableSim }) {
 
       {/* Operator buttons */}
       <div style={{ display: 'flex', gap: 6 }}>
-        <OpButton label="Start" color="#22aa55" enabled={startEnabled} onClick={sim.start} />
-        <OpButton label="CAFI" color="#3399ff" enabled={cafiEnabled} onClick={sim.placeCafi} />
-        <OpButton label="Stop" color="#dd5500" enabled={stopEnabled} onClick={sim.stop} />
-        <OpButton label="Reset" color="#a23bff" enabled={resetEnabled} onClick={sim.reset} />
+        <OpButton label="Start" color="#22aa55" enabled={startEnabled} onClick={onStart} />
+        <OpButton label="CAFI" color="#3399ff" enabled={cafiEnabled} onClick={onCafi} />
+        <OpButton label="Stop" color="#dd5500" enabled={stopEnabled} onClick={onStop} />
+        <OpButton label="Reset" color="#a23bff" enabled={resetEnabled} onClick={onReset} />
       </div>
+
+      {/* Contador de flota de CAFIs */}
+      {total ? (
+        <div style={{ display: 'flex', gap: 6 }}>
+          <div style={{ flex: 1, textAlign: 'center', padding: '5px 0', borderRadius: 5, fontSize: 10, fontWeight: 700, color: '#dde4f0', background: 'rgba(34,170,85,0.18)', border: '1px solid #22aa5566' }}>
+            CAFI IN: {cafiIn ?? 0}/{total}
+          </div>
+          <div style={{ flex: 1, textAlign: 'center', padding: '5px 0', borderRadius: 5, fontSize: 10, fontWeight: 700, color: '#dde4f0', background: 'rgba(59,139,255,0.18)', border: '1px solid #3b8bff66' }}>
+            CAFI OUT: {cafiOut ?? 0}/{total}
+          </div>
+        </div>
+      ) : null}
 
       {/* Cell state */}
       <Section title="Cell State">

@@ -11,7 +11,7 @@ import { STLLoader } from 'three-stdlib';
 import URDFLoader from 'urdf-loader';
 import type { URDFRobot } from 'urdf-loader';
 import OperatorHMI from './OperatorHMI';
-import { useTurntableSim, type UseTurntableSim } from './useTurntableSim';
+import type { SimSnapshot, TurntablePosition } from './turntableSim';
 
 // El panel DEBUG (poses, IK, jogging, secuencia) es una herramienta interna de
 // desarrollo. NO se muestra al usuario final: la pestaña "Celda 3D" arranca en
@@ -190,7 +190,7 @@ type CafiState =
 // kinematic frame).  Identity orientation, mesh uses CENTERED offset.
 type StaticCafiState = 'conveyor' | 'at_vision' | 'in_accept_bin' | 'in_reject_bin';
 const CAFI_AT: Record<StaticCafiState, [number, number, number]> = {
-  conveyor:      [1.535, 1.365, 1.070 + 0.0125],   // V57: pick X shifted +0.3 m east
+  conveyor:      [1.535, 1.365, 1.070 + 0.0125],   // V57: pick X shifted +0.3 m east (= punto de pick)
   at_vision:     [0.750, 0.804, 1.025],            // top of vision plate + half-CAFI
   in_accept_bin: [1.650, 0.720, 1.020],            // bin floor + half-CAFI
   in_reject_bin: [1.330, 0.700, 1.020],
@@ -217,7 +217,13 @@ type SequenceStep =
   | { kind: 'cafi';      state: CafiState;                 label?: string }
   | { kind: 'cafiColor'; color: CafiColor;                 label?: string }
   | { kind: 'disc';      target: number; duration: number; label?: string }
+  | { kind: 'cafiConveyor'; duration: number;              label?: string }
   | { kind: 'wait';      dwell: number;                    label?: string };
+
+// Punto donde el CAFI "aparece" en el conveyor (extremo del suministro) y desde
+// el cual viaja por la banda hasta el punto de pick (CAFI_AT.conveyor).  El paso
+// 'cafiConveyor' interpola la X de este punto al de pick.
+const CAFI_CONVEYOR_IN_X = 1.83;
 
 // Riveting cycle takes 30 s in the real cell (process spec).
 const RIVET_DWELL_S = 30.0;
@@ -231,7 +237,9 @@ const SEQUENCE_PRE: SequenceStep[] = [
   // === init ===
   { kind: 'pose',      pose: 'POSE_HOME', duration: 0.1 },
   { kind: 'cafiColor', color: 'natural' },
-  { kind: 'cafi',      state: 'conveyor', label: 'CAFI delivered to conveyor' },
+  { kind: 'cafi',      state: 'conveyor', label: 'CAFI entra al conveyor' },
+  // El CAFI viaja por la banda desde el suministro hasta el punto de pick.
+  { kind: 'cafiConveyor', duration: 2.2, label: 'CAFI avanza por el conveyor' },
   // === pick from conveyor ===
   { kind: 'pose',      pose: 'POSE_APPROACH_CONVEYOR', duration: 2.0 },
   { kind: 'pose',      pose: 'POSE_PICK_CONVEYOR',     duration: 1.5 },
@@ -520,6 +528,7 @@ function CafiMesh({
   stateRef, colorRef, cobotRobotRef, turntableRobotRef,
   graspYawRef, graspPitchRef, graspRollRef,
   graspOffsetXRef, graspOffsetYRef, graspOffsetZRef,
+  conveyorRef,
 }: {
   stateRef: React.MutableRefObject<CafiState>;
   colorRef: React.MutableRefObject<CafiColor>;
@@ -531,6 +540,7 @@ function CafiMesh({
   graspOffsetXRef: React.MutableRefObject<number>;
   graspOffsetYRef: React.MutableRefObject<number>;
   graspOffsetZRef: React.MutableRefObject<number>;
+  conveyorRef: React.MutableRefObject<number>;
 }) {
   // Both V53 cafi STLs have the same bbox but DIFFERENT vertex layouts.
   // Each was authored for a specific use:
@@ -621,7 +631,14 @@ function CafiMesh({
     } else {
       const xyz = CAFI_AT[state as StaticCafiState];
       if (xyz) {
-        g.position.set(xyz[0], xyz[1], xyz[2]);
+        // En el conveyor, el CAFI viaja desde el suministro (CAFI_CONVEYOR_IN_X)
+        // hasta el punto de pick según el progreso conveyorRef (0→1).
+        let px = xyz[0];
+        if (state === 'conveyor') {
+          const prog = Math.min(1, Math.max(0, conveyorRef.current));
+          px = CAFI_CONVEYOR_IN_X + (xyz[0] - CAFI_CONVEYOR_IN_X) * prog;
+        }
+        g.position.set(px, xyz[1], xyz[2]);
         g.quaternion.identity();
         m.position.set(...CAFI_OFFSET_CENTERED);
         if (m.geometry !== geomStatic) m.geometry = geomStatic;
@@ -719,6 +736,8 @@ function SequencePlayer({
   gripperRef,
   cafiStateRef,
   cafiColorRef,
+  cafiConveyorRef,
+  onDone,
 }: {
   playerRef: React.MutableRefObject<PlayerState>;
   jointsRef: React.MutableRefObject<[number, number, number, number, number, number]>;
@@ -726,6 +745,8 @@ function SequencePlayer({
   gripperRef: React.MutableRefObject<number>;
   cafiStateRef: React.MutableRefObject<CafiState>;
   cafiColorRef: React.MutableRefObject<CafiColor>;
+  cafiConveyorRef: React.MutableRefObject<number>;
+  onDone?: () => void;
 }) {
   useFrame((_, dt) => {
     const p = playerRef.current;
@@ -733,6 +754,10 @@ function SequencePlayer({
     const seq = p.sequence;
     const step = seq[p.step];
     if (!step) { p.playing = false; return; }
+
+    // Multiplicador de velocidad opcional (solo para pruebas/demo rápida):
+    // window.__CELL_SPEED = 40 acelera el ciclo. Default 1 (timing real ROS).
+    const speed = (typeof window !== 'undefined' && (window as unknown as { __CELL_SPEED?: number }).__CELL_SPEED) || 1;
 
     // First entry into a step? Snapshot the start state.
     if (p.t === 0) {
@@ -742,9 +767,10 @@ function SequencePlayer({
       if (step.kind === 'cafi')      cafiStateRef.current = step.state;
       if (step.kind === 'cafiColor') cafiColorRef.current = step.color;
       if (step.kind === 'gripper')   gripperRef.current = step.open ? GRIPPER_OPEN_M : GRIPPER_CLOSED_M;
+      if (step.kind === 'cafiConveyor') cafiConveyorRef.current = 0; // arranca en el suministro
     }
 
-    p.t += dt;
+    p.t += dt * speed;
 
     let done = false;
     if (step.kind === 'pose') {
@@ -763,6 +789,11 @@ function SequencePlayer({
       const eased = 0.5 * (1 - Math.cos(Math.PI * u));
       discAngleRef.current = p.startDisc + (step.target - p.startDisc) * eased;
       if (u >= 1) done = true;
+    } else if (step.kind === 'cafiConveyor') {
+      const dur = Math.max(0.0001, step.duration);
+      const u = Math.min(1, p.t / dur);
+      cafiConveyorRef.current = 0.5 * (1 - Math.cos(Math.PI * u)); // 0→1 (suministro→pick)
+      if (u >= 1) { cafiConveyorRef.current = 1; done = true; }
     } else if (step.kind === 'gripper') {
       if (p.t >= step.dwell) done = true;
     } else if (step.kind === 'cafi' || step.kind === 'cafiColor') {
@@ -774,7 +805,10 @@ function SequencePlayer({
     if (done) {
       p.step += 1;
       p.t = 0;
-      if (p.step >= seq.length) p.playing = false;
+      if (p.step >= seq.length) {
+        p.playing = false;
+        if (onDone) onDone(); // ciclo (1 CAFI) terminado → encadenar el siguiente
+      }
     }
   });
   return null;
@@ -1996,6 +2030,93 @@ function ZUpBootstrap() {
   return null;
 }
 
+// Deriva el snapshot de la HMI V62 desde el estado REAL del ciclo de la celda
+// (SequencePlayer + refs).  Es un espejo de lo que pasa en la escena 3D — igual
+// que la HMI ROS, que solo refleja topics.  No controla nada por sí misma.
+function deriveCellSnapshot(args: {
+  player: PlayerState;
+  discRad: number;
+  cafiState: CafiState;
+  cafiColor: CafiColor;
+  gripperOpen: boolean;
+  fleetRunning: boolean;
+  cafiOut: number;
+  total: number;
+}): SimSnapshot {
+  const { player, discRad, cafiState, cafiColor, gripperOpen, cafiOut, total } = args;
+  const step = player.sequence[player.step];
+  const playing = player.playing;
+  const angleDeg = (discRad * 180) / Math.PI;
+  const kind = step?.kind;
+  const label = step?.label ?? '';
+  const isDiscMove = kind === 'disc';
+  const discTarget = kind === 'disc' ? step.target : 0;
+  const riveting = kind === 'wait' && /rivet/i.test(label);
+  const fleetDone = total > 0 && cafiOut >= total && !playing;
+  const rivetingDone =
+    cafiState === 'at_vision' || cafiState === 'in_accept_bin' || cafiState === 'in_reject_bin';
+
+  let position: TurntablePosition;
+  if (isDiscMove && discTarget > 0.5) position = 'MOVING_TO_WORK';
+  else if (isDiscMove) position = 'MOVING_TO_HOME';
+  else if (riveting) position = 'RIVETING';
+  else if (angleDeg > 170) position = 'WORK';
+  else if (fleetDone) position = 'CYCLE_DONE';
+  else position = 'HOME';
+
+  const moving = isDiscMove;
+  const verdict = cafiColor === 'accept' ? 'PASS' : cafiColor === 'reject' ? 'FAIL' : '';
+  const cell = playing ? 'RUNNING' : 'IDLE';
+  const cycleStage = !playing ? (fleetDone ? 'DONE' : 'IDLE') : label || kind || 'RUN';
+  const message = playing
+    ? label || 'Ciclo en curso'
+    : fleetDone
+      ? `Ciclo terminado — ${total} CAFIs procesados`
+      : 'Esperando inicio (pulsa START)';
+
+  const tt = {
+    angle_deg: Math.round(angleDeg * 10) / 10,
+    position,
+    moving,
+    target: (position === 'MOVING_TO_WORK' || position === 'HOME' ? 'WORK' : 'HOME') as 'WORK' | 'HOME',
+    last_direction: (isDiscMove ? (discTarget > 0.5 ? 'TO_WORK' : 'TO_HOME') : 'NONE') as
+      'TO_WORK' | 'TO_HOME' | 'NONE',
+    limit_home: angleDeg < 5,
+    limit_work: angleDeg > 175,
+    riveting,
+    riveting_done: rivetingDone,
+    fault: false,
+    message,
+  };
+
+  return {
+    cell,
+    cafiPresent: cafiState !== 'parked' && cafiState !== 'conveyor',
+    spawnAllowed: !playing,
+    verdict,
+    cycleStage,
+    faultReason: '',
+    turntable: tt,
+    telemetry: { timestamp: '', ok: true, _demo: true, turntable: tt },
+    di: {
+      conveyor: cafiState === 'conveyor',
+      rivet: cafiState === 'on_fixture_1' || riveting || angleDeg > 170,
+      vision: cafiState === 'at_vision',
+      cobotReady: !moving,
+    },
+    do: {
+      convMotor: cafiState === 'conveyor',
+      disco: moving,
+      remachado: riveting,
+      camara: cafiState === 'at_vision' && cafiColor === 'natural',
+      gripOpen: gripperOpen,
+      gripClose: !gripperOpen,
+      solLeft: angleDeg > 170,
+      reservado: false,
+    },
+  };
+}
+
 // ── Side HMI panel (debug poses + joint readout) ─────────────────────────────
 function HMIPanel({
   setPose,
@@ -2046,10 +2167,16 @@ function HMIPanel({
   poseRegenStatus,
   poseRegenWarnings,
   regeneratePoseLib,
-  turntableSim,
+  startFleet,
+  cafiInRef,
+  cafiOutRef,
+  fleetRef,
 }: {
   setPose: (p: PoseName) => void;
-  turntableSim: UseTurntableSim;
+  startFleet: (total?: number) => void;
+  cafiInRef: React.MutableRefObject<number>;
+  cafiOutRef: React.MutableRefObject<number>;
+  fleetRef: React.MutableRefObject<{ running: boolean; total: number }>;
   jointsRef: React.MutableRefObject<[number, number, number, number, number, number]>;
   discAngleRef: React.MutableRefObject<number>;
   setDiscAngle: (a: number) => void;
@@ -2132,7 +2259,32 @@ function HMIPanel({
         </div>
       )}
 
-      {tab === 'hmi' && <OperatorHMI sim={turntableSim} />}
+      {tab === 'hmi' && (() => {
+        // HMIPanel se re-renderiza cada 100 ms (intervalo de arriba), así que
+        // este snapshot derivado del player se refresca a ~10 Hz.
+        const snap = deriveCellSnapshot({
+          player: playerRef.current,
+          discRad: discAngleRef.current,
+          cafiState: cafiStateRef.current,
+          cafiColor: cafiColorRef.current,
+          gripperOpen: gripperRef.current > GRIPPER_OPEN_M / 2,
+          fleetRunning: fleetRef.current.running,
+          cafiOut: cafiOutRef.current,
+          total: fleetRef.current.total,
+        });
+        return (
+          <OperatorHMI
+            snapshot={snap}
+            onStart={() => startFleet(5)}
+            onCafi={() => startFleet(1)}
+            onStop={playerPause}
+            onReset={playerReset}
+            cafiIn={cafiInRef.current}
+            cafiOut={cafiOutRef.current}
+            total={fleetRef.current.total}
+          />
+        );
+      })()}
 
       {SHOW_DEBUG && tab === 'debug' && <>
 
@@ -2713,10 +2865,8 @@ const statRow: React.CSSProperties = {
 export default function CellViewer3D() {
   const jointsRef = useRef<[number, number, number, number, number, number]>([...POSE_LIB.POSE_HOME]);
   const discAngleRef = useRef(0);
-  // Simulación (mock) de la mesa rotatoria: corre la máquina de estados completa
-  // HOME→WORK→RIVETING→HOME y escribe el ángulo del disco en discAngleRef para
-  // que el URDF gire en tiempo real.  Alimenta también la HMI V62.
-  const turntableSim = useTurntableSim(discAngleRef);
+  // Progreso del CAFI sobre el conveyor (0 = suministro, 1 = punto de pick).
+  const cafiConveyorRef = useRef(1);
   const gripperRef = useRef<number>(GRIPPER_OPEN_M);        // target
   const gripperLiveRef = useRef<number>(GRIPPER_OPEN_M);    // animated
   const gripperWorldRef = useRef<[number, number, number]>([0, 0, 0]);
@@ -2887,6 +3037,13 @@ export default function CellViewer3D() {
   });
   const [, forcePlayerTick] = useState(0); // re-render HMI when player advances
 
+  // ── Flota de CAFIs: corre N ciclos seguidos (N entran, N salen) ────────────
+  // fleet.running = hay una corrida en curso; total = CAFIs objetivo;
+  // cafiIn = cuántos han entrado al conveyor; cafiOut = cuántos terminaron (bin).
+  const fleetRef = useRef<{ running: boolean; total: number }>({ running: false, total: 0 });
+  const cafiInRef = useRef(0);
+  const cafiOutRef = useRef(0);
+
   // Start a fresh cycle with the given verdict.  Resets all refs, builds the
   // verdict-specific sequence (accept → green tail, reject → red tail), and
   // sets the player playing.  Random verdict (50/50) → 'auto'.
@@ -2908,8 +3065,32 @@ export default function CellViewer3D() {
     gripperRef.current = GRIPPER_OPEN_M;
     cafiStateRef.current = 'conveyor';
     cafiColorRef.current = 'natural';
+    cafiConveyorRef.current = 0; // el CAFI arranca en el suministro
     forcePlayerTick((n) => n + 1);
   };
+
+  // Arranca una corrida de N CAFIs (N entran, N salen).  Cada CAFI completa el
+  // ciclo y al terminar (onCycleDone) se dispara el siguiente hasta llegar a N.
+  const startFleet = (total = 5) => {
+    fleetRef.current = { running: true, total };
+    cafiInRef.current = 1;   // primer CAFI entra
+    cafiOutRef.current = 0;
+    startCycle('auto');
+  };
+  // Llamado por el SequencePlayer cuando un CAFI termina su ciclo.
+  const onCycleDone = () => {
+    const fleet = fleetRef.current;
+    cafiOutRef.current += 1; // un CAFI salió (llegó al bin)
+    if (!fleet.running) return;
+    if (cafiOutRef.current >= fleet.total) {
+      fleet.running = false; // los N CAFIs completaron
+      forcePlayerTick((n) => n + 1);
+      return;
+    }
+    cafiInRef.current += 1; // siguiente CAFI entra
+    startCycle('auto');
+  };
+
   const playerPause = () => {
     playerRef.current.playing = false;
     forcePlayerTick((n) => n + 1);
@@ -2935,6 +3116,10 @@ export default function CellViewer3D() {
     gripperRef.current = GRIPPER_OPEN_M;
     cafiStateRef.current = 'conveyor';
     cafiColorRef.current = 'natural';
+    cafiConveyorRef.current = 1;
+    fleetRef.current = { running: false, total: 0 };
+    cafiInRef.current = 0;
+    cafiOutRef.current = 0;
     forcePlayerTick((n) => n + 1);
   };
 
@@ -3082,6 +3267,7 @@ export default function CellViewer3D() {
               graspOffsetXRef={cafiGraspOffsetXRef}
               graspOffsetYRef={cafiGraspOffsetYRef}
               graspOffsetZRef={cafiGraspOffsetZRef}
+              conveyorRef={cafiConveyorRef}
             />
           </Suspense>
 
@@ -3092,6 +3278,8 @@ export default function CellViewer3D() {
             gripperRef={gripperRef}
             cafiStateRef={cafiStateRef}
             cafiColorRef={cafiColorRef}
+            cafiConveyorRef={cafiConveyorRef}
+            onDone={onCycleDone}
           />
 
           <CollisionBoxes visible={showCollisions} />
@@ -3157,7 +3345,10 @@ export default function CellViewer3D() {
           poseRegenStatus={poseRegenStatus}
           poseRegenWarnings={poseRegenWarnings}
           regeneratePoseLib={regeneratePoseLib}
-          turntableSim={turntableSim}
+          startFleet={startFleet}
+          cafiInRef={cafiInRef}
+          cafiOutRef={cafiOutRef}
+          fleetRef={fleetRef}
         />
       </div>
     </div>
